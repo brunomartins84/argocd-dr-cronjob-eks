@@ -1,0 +1,92 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: argocd
+  name: argocd-configmap-reader
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list"]
+- apiGroups: ["argoproj.io"]
+  resources: ["appprojects", "applications", "applicationsets"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  namespace: argocd
+  name: argocd-configmap-reader-binding
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: argocd
+roleRef:
+  kind: Role
+  name: argocd-configmap-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  annotations:
+  name: argocd-cronjob
+  namespace: argocd
+type: Opaque
+data:
+  argocd-login-passwd: Y3VyaW9zb3ByYWNhcmFsZW9oZWluPVA=
+  aws-access-key-id: dmVpb3NlY29mYXplcmRlY29kZW7DqXJpc29z
+  aws-secret-access-key: c291bm9vYm1hc21hbmpvdW1wb3VxdWluaG9kZXNlYw==
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: argocd-backup
+  namespace: argocd
+spec:
+  schedule: "0 18 * * 1,3,5"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: backup
+            image: registry-url/argocd-kubectl:latest
+            env:
+            - name: ARGOCD_LOGIN_PASSWD
+              valueFrom:
+                secretKeyRef:
+                  name: argocd-cronjob
+                  key: argocd-login-passwd
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: argocd-cronjob
+                  key: aws-access-key-id
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: argocd-cronjob
+                  key: aws-secret-access-key
+            command: ["/bin/sh", "-c"]
+            args:
+            - |
+              echo "Iniciando login no ArgoCD..."
+              argocd login your-argos-url:443 --username your-user --password $ARGOCD_LOGIN_PASSWD --grpc-web
+              echo "Login no ArgoCD concluído. Iniciando exportação..."
+              argocd admin export > backup-$(date +%Y%m%d%H%M%S).yaml
+              echo "Exportação concluída. Iniciando upload para S3..."
+              aws s3 cp *.yaml s3://your-bucket/
+              echo "Backup concluído com sucesso."
+            volumeMounts:
+            - name: backup-storage
+              mountPath: /backup
+          restartPolicy: OnFailure
+          volumes:
+          - name: backup-storage
+            emptyDir: {}
+          imagePullSecrets:
+          - name: token-registry
+          terminationGracePeriodSeconds: 30
